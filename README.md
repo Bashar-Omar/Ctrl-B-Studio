@@ -60,3 +60,19 @@ The studio prefers live `pricing_skus` from OpenRouter when their unit can be re
 - `kwaivgi/kling-v3.0-std`
 - `kwaivgi/kling-video-o1`
 - `bytedance/seedance-2.0`
+
+## V1.1 — prompt budgets + product colorways
+
+This build adds provider-aware preflight controls for real-world e-commerce workflows:
+
+- Live provider prompt character counter.
+- Hard 2,500-character preflight for Kling Video 3.x / O1 so known provider failures are blocked before submission.
+- `Fit to model` deterministic local compaction (no LLM/API cost).
+- Compact reference mapping: product-fidelity rules are written once instead of repeated for every uploaded image.
+- Same-SKU multi-color workflow with per-image colorway labels and three strategies: target color only, lineup, or controlled color transition.
+- `Not sent · keep uploaded` lets the workspace keep up to 15 assets while respecting smaller provider reference limits.
+- Kling Video O1 6-reference preflight.
+- Safe image preflight (minimum 300 px dimensions, aspect ratio 1:2.5–2.5:1).
+- Cleaner upstream OpenRouter error messages.
+
+See `PROMPT-AND-VARIANTS.md` for usage notes.

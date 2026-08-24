@@ -15,7 +15,16 @@ function appHeaders(json = true) {
 async function checked(response: Response) {
   if (!response.ok) {
     const body = await response.text();
-    const err = new Error(body || `OpenRouter request failed (${response.status})`);
+    let message = body || `OpenRouter request failed (${response.status})`;
+    try {
+      const parsed = JSON.parse(body);
+      const upstream = parsed?.error?.message || parsed?.message || parsed?.error || parsed;
+      message = typeof upstream === "string" ? upstream : JSON.stringify(upstream);
+    } catch { /* keep raw body */ }
+    if (/prompt: size must be between 0 and 2500/i.test(message)) {
+      message = "The selected Kling provider rejected the prompt because it exceeds 2,500 characters. Use ‘Fit to model’ in CTRL-B Video Studio and submit again.";
+    }
+    const err = new Error(message);
     (err as Error & { status?: number }).status = response.status;
     throw err;
   }

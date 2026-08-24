@@ -1,5 +1,7 @@
 export type FrameType = "first_frame" | "last_frame";
-export type AssetRole = "reference" | "detail" | FrameType;
+export type AssetRole = "reference" | "detail" | "exclude" | FrameType;
+export type VariantMode = "single" | "multi_color";
+export type VariantStrategy = "target_only" | "lineup" | "transition";
 
 export type VideoModel = {
   id: string;
@@ -25,6 +27,7 @@ export type UploadedAsset = {
   size: number;
   role: AssetRole;
   note: string;
+  variant: string;
   url: string;
 };
 
@@ -46,6 +49,9 @@ export type CreativeState = {
   script: string;
   negative: string;
   brandConstraints: string;
+  variantMode: VariantMode;
+  variantStrategy: VariantStrategy;
+  targetVariant: string;
 };
 
 export type VideoSubmitRequest = {

@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AssetRole, CreativeState, UploadedAsset, VideoJob, VideoModel } from "@/lib/types";
-import { buildPrompt } from "@/lib/prompt-builder";
+import { buildPrompt, fitPromptToChars } from "@/lib/prompt-builder";
+import { countPromptChars, getModelConstraint, safePromptTarget } from "@/lib/model-constraints";
 import { estimateVideoCost, money } from "@/lib/pricing";
 
 const PRESETS = ["Product Hero Ad", "UGC Talking Ad", "Beauty / Cosmetics Demo", "Perfume Cinematic", "Footwear Showcase", "Custom"];
@@ -13,6 +14,7 @@ const INITIAL: CreativeState = {
   camera: "Slow controlled push-in with macro product close-ups", motion: "Natural, physically plausible motion; smooth and elegant", palette: "Brand-faithful neutral palette",
   talent: "None", language: "English", dialect: "", delivery: "Natural, confident and conversational", script: "", negative: "warped packaging, altered logo, unreadable labels, extra products, flicker, jitter, deformed hands, plastic skin, overdone VFX",
   brandConstraints: "Keep the product design, logo, label placement, materials and colors faithful to the uploaded references",
+  variantMode: "single", variantStrategy: "target_only", targetVariant: "",
 };
 
 function Field({ label, value, onChange, placeholder, rows = 1 }: { label: string; value: string; onChange: (v: string) => void; placeholder?: string; rows?: number }) {
@@ -49,6 +51,7 @@ export function Studio({ egpRate }: { egpRate: number }) {
   const fileRef = useRef<HTMLInputElement>(null);
 
   const model = useMemo(() => models.find((m) => m.id === modelId) ?? null, [models, modelId]);
+  const constraint = useMemo(() => getModelConstraint(modelId), [modelId]);
   const composed = useMemo(() => buildPrompt(creative, assets), [creative, assets]);
   useEffect(() => { if (!promptEdited) setPrompt(composed); }, [composed, promptEdited]);
 
@@ -76,6 +79,11 @@ export function Studio({ egpRate }: { egpRate: number }) {
   const first = assets.find((a) => a.role === "first_frame");
   const last = assets.find((a) => a.role === "last_frame");
   const refs = assets.filter((a) => a.role === "reference" || a.role === "detail");
+  const promptChars = countPromptChars(prompt);
+  const promptLimit = constraint.promptMaxChars ?? null;
+  const hardPromptOver = Boolean(promptLimit && constraint.promptLimitConfidence === "hard" && promptChars > promptLimit);
+  const refLimit = constraint.maxReferenceImages ?? null;
+  const hardRefOver = Boolean(refLimit && constraint.referenceLimitConfidence === "hard" && refs.length > refLimit);
 
   const uploadFiles = useCallback(async (files: FileList | File[]) => {
     const max = 15 - assets.length;
@@ -84,11 +92,16 @@ export function Studio({ egpRate }: { egpRate: number }) {
     setUploading(true); setError("");
     try {
       for (const file of list) {
+        const bitmap = await createImageBitmap(file);
+        const ratio = bitmap.width / bitmap.height;
+        const width = bitmap.width; const height = bitmap.height; bitmap.close();
+        if (width < 300 || height < 300) throw new Error(`${file.name}: product references should be at least 300×300 px for Kling/Seedance compatibility.`);
+        if (ratio < 0.4 || ratio > 2.5) throw new Error(`${file.name}: image aspect ratio must stay between 1:2.5 and 2.5:1 for safe provider compatibility.`);
         const form = new FormData(); form.append("file", file);
         const r = await fetch("/api/uploads", { method: "POST", body: form });
         const data = await r.json();
         if (!r.ok) throw new Error(data.error || "Upload failed");
-        setAssets((prev) => [...prev, { id: data.id, name: data.name, type: data.type, size: data.size, url: data.url, role: "reference", note: "" }]);
+        setAssets((prev) => [...prev, { id: data.id, name: data.name, type: data.type, size: data.size, url: data.url, role: "reference", note: "", variant: "" }]);
       }
     } catch (e) { setError(e instanceof Error ? e.message : "Upload failed"); }
     finally { setUploading(false); }
@@ -106,6 +119,8 @@ export function Studio({ egpRate }: { egpRate: number }) {
 
   const submit = async () => {
     if (!model || !prompt.trim()) return;
+    if (hardPromptOver && promptLimit) { setError(`Prompt is ${promptChars} characters; ${model.name} accepts at most ${promptLimit}. Use “Fit to model” first.`); return; }
+    if (hardRefOver && refLimit) { setError(`${model.name} accepts at most ${refLimit} active reference images. Mark extra uploads as “Not sent” or switch models.`); return; }
     setSubmitting(true); setError(""); setJob(null);
     try {
       let provider: Record<string, unknown> | undefined;
@@ -151,7 +166,16 @@ export function Studio({ egpRate }: { egpRate: number }) {
         <section className="card"><div className="cardhead"><div><span className="step">02</span><h2>Product references</h2></div><span className="counter">{assets.length}/15</span></div>
           <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp" multiple hidden onChange={(e) => e.target.files && uploadFiles(e.target.files)} />
           <div className="dropzone" onClick={() => fileRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); uploadFiles(e.dataTransfer.files); }}><div className="upload-icon">＋</div><strong>{uploading ? "Uploading…" : "Drop product images here"}</strong><span>JPG, PNG or WEBP · up to 10 MB each · 15 images max</span></div>
-          {assets.length > 0 && <div className="asset-grid">{assets.map((a) => <div className="asset" key={a.id}><img src={a.url} alt={a.name}/><button className="asset-x" onClick={() => removeAsset(a.id)}>×</button><div className="asset-controls"><select value={a.role} onChange={(e) => setRole(a.id, e.target.value as AssetRole)}><option value="reference">Product reference</option><option value="detail">Detail reference</option>{model?.supported_frame_images?.includes("first_frame") && <option value="first_frame">First frame</option>}{model?.supported_frame_images?.includes("last_frame") && <option value="last_frame">Last frame</option>}</select><input value={a.note} placeholder="e.g. front label / sole detail" onChange={(e) => setAssets((p) => p.map((x) => x.id === a.id ? { ...x, note: e.target.value } : x))}/></div></div>)}</div>}
+          <div className="variant-panel">
+            <div className="grid two">
+              <label className="field"><span>Product variant mode</span><select value={creative.variantMode} onChange={(e) => patch("variantMode", e.target.value as CreativeState["variantMode"])}><option value="single">Single product / one colorway</option><option value="multi_color">Same SKU · multiple colorways</option></select></label>
+              {creative.variantMode === "multi_color" && <label className="field"><span>Colorway behavior</span><select value={creative.variantStrategy} onChange={(e) => patch("variantStrategy", e.target.value as CreativeState["variantStrategy"])}><option value="target_only">Render one target colorway</option><option value="lineup">Show multiple colorways as separate products</option><option value="transition">Controlled colorway transition</option></select></label>}
+            </div>
+            {creative.variantMode === "multi_color" && creative.variantStrategy === "target_only" && <Field label="Target colorway" value={creative.targetVariant} onChange={(v) => patch("targetVariant", v)} placeholder="e.g. Black / Burgundy / Beige"/>}
+            <p>For the same shoe/product in different colors, label each image below. The prompt compiler locks geometry and branding so colorways are not treated as different designs.</p>
+          </div>
+          {refLimit && <div className={hardRefOver ? "limit-note danger" : refs.length >= refLimit ? "limit-note warn" : "limit-note"}><strong>{model?.name}: {refLimit} reference image{refLimit === 1 ? "" : "s"} {constraint.referenceLimitConfidence === "hard" ? "max" : "recommended"}</strong><span>{refs.length} active reference{refs.length === 1 ? "" : "s"}. Use “Not sent” on extra uploads if needed.</span></div>}
+          {assets.length > 0 && <div className="asset-grid">{assets.map((a) => <div className="asset" key={a.id}><img src={a.url} alt={a.name}/><button className="asset-x" onClick={() => removeAsset(a.id)}>×</button><div className="asset-controls"><select value={a.role} onChange={(e) => setRole(a.id, e.target.value as AssetRole)}><option value="reference">Product reference</option><option value="detail">Detail reference</option><option value="exclude">Not sent · keep uploaded</option>{model?.supported_frame_images?.includes("first_frame") && <option value="first_frame">First frame</option>}{model?.supported_frame_images?.includes("last_frame") && <option value="last_frame">Last frame</option>}</select>{creative.variantMode === "multi_color" && <input value={a.variant} placeholder="Colorway e.g. Black" onChange={(e) => setAssets((p) => p.map((x) => x.id === a.id ? { ...x, variant: e.target.value } : x))}/>}<input value={a.note} placeholder="e.g. side view / sole detail" onChange={(e) => setAssets((p) => p.map((x) => x.id === a.id ? { ...x, note: e.target.value } : x))}/></div></div>)}</div>}
         </section>
 
         <section className="card"><div className="cardhead"><div><span className="step">03</span><h2>Creative direction</h2></div><span className="muted">Structured prompt control</span></div>
@@ -160,7 +184,8 @@ export function Studio({ egpRate }: { egpRate: number }) {
           <div className="grid three"><Select label="Talent" value={creative.talent} options={["None", "Female 20s", "Female 30s", "Male 20s", "Male 30s", "Custom talent in prompt"]} onChange={(v) => patch("talent", v)}/><Select label="Spoken language" value={creative.language} options={["English", "Arabic", "Egyptian Arabic", "Gulf Arabic", "French", "Custom"]} onChange={(v) => patch("language", v)}/><Select label="Delivery" value={creative.delivery} options={["Natural, confident and conversational", "Premium and calm", "Friendly testimonial", "Energetic creator", "Educational", "Direct-response sales"]} onChange={(v) => patch("delivery", v)}/></div>
           {creative.talent !== "None" && <div className="grid two"><Field label="Dialect / voice note" value={creative.dialect} onChange={(v) => patch("dialect", v)} placeholder="e.g. natural Egyptian Cairo dialect"/><Field label="Dialogue / script" value={creative.script} onChange={(v) => patch("script", v)} placeholder="Exact line to be spoken" rows={3}/></div>}
           <div className="grid two"><Field label="Brand constraints" value={creative.brandConstraints} onChange={(v) => patch("brandConstraints", v)} rows={3}/><Field label="Negative instructions" value={creative.negative} onChange={(v) => patch("negative", v)} rows={3}/></div>
-          <div className="promptbox"><div className="prompthead"><span>FINAL PROMPT</span><div><button onClick={() => { setPrompt(composed); setPromptEdited(false); }}>Rebuild</button><button onClick={() => navigator.clipboard?.writeText(prompt)}>Copy</button></div></div><textarea value={prompt} onChange={(e) => { setPrompt(e.target.value); setPromptEdited(true); }} rows={12}/></div>
+          <div className="promptbox"><div className="prompthead"><span>PROVIDER PROMPT</span><div><button onClick={() => { setPrompt(composed); setPromptEdited(false); }}>Rebuild concise</button>{promptLimit && <button onClick={() => { setPrompt(fitPromptToChars(prompt || composed, safePromptTarget(promptLimit))); setPromptEdited(true); }}>Fit to model</button>}<button onClick={() => navigator.clipboard?.writeText(prompt)}>Copy</button></div></div><textarea value={prompt} onChange={(e) => { setPrompt(e.target.value); setPromptEdited(true); }} rows={12}/><div className={`prompt-budget ${hardPromptOver ? "danger" : promptLimit && promptChars > safePromptTarget(promptLimit) ? "warn" : "ok"}`}><span>{promptLimit ? `${promptChars.toLocaleString()} / ${promptLimit.toLocaleString()} chars` : `${promptChars.toLocaleString()} chars · provider limit not published`}</span>{promptLimit && <b>{constraint.promptLimitConfidence === "hard" ? "Hard provider limit" : "Safe recommendation"}</b>}</div></div>
+          {promptLimit && <div className={hardPromptOver ? "limit-note danger" : promptChars > safePromptTarget(promptLimit) ? "limit-note warn" : "limit-note"}><strong>{hardPromptOver ? "Prompt is too long for this model" : `Safe prompt budget: ${safePromptTarget(promptLimit).toLocaleString()} chars`}</strong><span>{hardPromptOver ? `This provider will reject more than ${promptLimit.toLocaleString()} characters. Use “Fit to model” before generating.` : "Your structured fields can stay detailed; the provider prompt should stay concise and load-bearing."}</span></div>}
         </section>
 
         <section className="card"><div className="cardhead"><div><span className="step">04</span><h2>Output controls</h2></div><span className="muted">Only supported options are shown</span></div>
@@ -178,7 +203,7 @@ export function Studio({ egpRate }: { egpRate: number }) {
       <aside className="result-column">
         <div className="sticky">
           <section className="cost-card"><div className="cost-head"><span>ESTIMATED GENERATION</span><span className="live-dot">LIVE</span></div><div className="cost-main"><strong>{money(estimate)}</strong><span>≈ {estimate === null ? "—" : money(estimate * fxRate, "EGP")}</span></div><div className="cost-break"><span>{model?.name ?? "Model"}</span><b>{duration}s · {resolution} · {aspect}</b><span>Audio</span><b>{audio ? "On" : "Off"}</b><span>References</span><b>{refs.length + Number(Boolean(first)) + Number(Boolean(last))}</b><span>USD/EGP rate</span><label className="fx-mini"><input type="number" min="1" step="0.01" value={fxRate} onChange={(e) => setFxRate(Math.max(1, Number(e.target.value) || 1))}/></label></div><p className="estimate-note">Estimate uses live OpenRouter pricing metadata when recognizable, with a dated fallback for the six test models. Final OpenRouter usage is shown after completion.</p></section>
-          <button className="generate" type="button" disabled={submitting || !model || !prompt.trim()} onClick={submit}><span>{submitting ? "SUBMITTING…" : job && !terminal ? "GENERATION RUNNING" : "GENERATE VIDEO"}</span><b>{estimate === null ? "Cost after render" : money(estimate)}</b></button>
+          <button className="generate" type="button" disabled={submitting || !model || !prompt.trim() || hardPromptOver || hardRefOver} onClick={submit}><span>{submitting ? "SUBMITTING…" : job && !terminal ? "GENERATION RUNNING" : "GENERATE VIDEO"}</span><b>{estimate === null ? "Cost after render" : money(estimate)}</b></button>
           {error && <div className="errorbox"><strong>Studio notice</strong><p>{error}</p></div>}
 
           <section className="preview-card"><div className="preview-head"><div><span>OUTPUT MONITOR</span><strong>{job ? job.status.replace("_", " ") : "Ready"}</strong></div>{job && <code>{job.id}</code>}</div>

@@ -3,6 +3,7 @@ import { submitVideo, listVideoModels } from "@/lib/openrouter";
 import { MODEL_FALLBACKS, MODEL_ORDER } from "@/lib/model-fallbacks";
 import type { VideoSubmitRequest } from "@/lib/types";
 import { assertSameOrigin, rateLimit } from "@/lib/guard";
+import { countPromptChars, getModelConstraint } from "@/lib/model-constraints";
 
 function mediaUrl(origin: string, id: string) {
   const base = (process.env.APP_URL || origin).replace(/\/$/, "");
@@ -17,6 +18,17 @@ export async function POST(request: NextRequest) {
     if (!MODEL_ORDER.includes(body.model as (typeof MODEL_ORDER)[number])) return NextResponse.json({ error: "Model is not allowed in this studio." }, { status: 400 });
     if (!body.prompt?.trim()) return NextResponse.json({ error: "Prompt is required." }, { status: 400 });
 
+    const studioConstraint = getModelConstraint(body.model);
+    const promptChars = countPromptChars(body.prompt.trim());
+    if (studioConstraint.promptMaxChars && studioConstraint.promptLimitConfidence === "hard" && promptChars > studioConstraint.promptMaxChars) {
+      return NextResponse.json({
+        error: `${MODEL_FALLBACKS[body.model]?.name || body.model} accepts at most ${studioConstraint.promptMaxChars} prompt characters. Current prompt: ${promptChars}. Use the studio “Fit to model” action before submitting.`,
+        code: "PROMPT_TOO_LONG",
+        promptChars,
+        promptMaxChars: studioConstraint.promptMaxChars,
+      }, { status: 400 });
+    }
+
     let model = MODEL_FALLBACKS[body.model];
     try { model = (await listVideoModels()).find((m) => m.id === body.model) ?? model; } catch { /* fallback validation */ }
     if (!model.supported_durations?.includes(Number(body.duration))) return NextResponse.json({ error: "Selected duration is not supported by this model." }, { status: 400 });
@@ -24,6 +36,12 @@ export async function POST(request: NextRequest) {
     if (body.aspect_ratio && model.supported_aspect_ratios?.length && !model.supported_aspect_ratios.includes(body.aspect_ratio)) return NextResponse.json({ error: "Selected aspect ratio is not supported by this model." }, { status: 400 });
 
     const refIds = (body.referenceIds ?? []).slice(0, Math.max(1, Number(process.env.MAX_UPLOAD_FILES || 15)));
+    if (studioConstraint.maxReferenceImages && studioConstraint.referenceLimitConfidence === "hard" && refIds.length > studioConstraint.maxReferenceImages) {
+      return NextResponse.json({
+        error: `${MODEL_FALLBACKS[body.model]?.name || body.model} accepts at most ${studioConstraint.maxReferenceImages} reference images. Current active references: ${refIds.length}. Mark extra uploads as “Not sent” or switch models.`,
+        code: "TOO_MANY_REFERENCES",
+      }, { status: 400 });
+    }
     const hasMedia = Boolean(body.firstFrameId || body.lastFrameId || refIds.length);
     const origin = request.nextUrl.origin;
     const publicBase = process.env.APP_URL || origin;
