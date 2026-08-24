@@ -2,12 +2,14 @@ export type FrameType = "first_frame" | "last_frame";
 export type AssetRole = "reference" | "detail" | "exclude" | FrameType;
 export type VariantMode = "single" | "multi_color";
 export type VariantStrategy = "target_only" | "lineup" | "transition";
+export type StudioWorkflow = "generate" | "video_edit" | "unknown";
 
 export type VideoModel = {
   id: string;
   canonical_slug?: string | null;
   name: string;
   description?: string | null;
+  created?: number | null;
   supported_durations: number[];
   supported_resolutions: string[];
   supported_aspect_ratios: string[];
@@ -17,6 +19,7 @@ export type VideoModel = {
   seed?: boolean | number | null;
   pricing_skus?: Record<string, string | number> | null;
   allowed_passthrough_parameters?: string[];
+  workflow?: StudioWorkflow;
   fallback?: boolean;
 };
 
@@ -59,6 +62,7 @@ export type VideoSubmitRequest = {
   prompt: string;
   duration: number;
   resolution?: string;
+  size?: string;
   aspect_ratio?: string;
   generate_audio?: boolean;
   seed?: number;

@@ -50,7 +50,7 @@ Create a dedicated limited API key and put it only in `OPENROUTER_API_KEY`. For 
 
 ## Notes on pricing
 
-The studio prefers live `pricing_skus` from OpenRouter when their unit can be recognized. Because SKU naming can vary, it also contains a dated fallback snapshot for the six test models. The final amount shown after completion always comes from OpenRouter's `usage.cost`, which is the authoritative actual cost.
+The studio prefers live `pricing_skus` from OpenRouter when their unit can be recognized. Because SKU naming can vary, it also contains curated fallback pricing for the featured production models. The final amount shown after completion always comes from OpenRouter's `usage.cost`, which is the authoritative actual cost.
 
 ## Model slugs
 
@@ -76,3 +76,24 @@ This build adds provider-aware preflight controls for real-world e-commerce work
 - Cleaner upstream OpenRouter error messages.
 
 See `PROMPT-AND-VARIANTS.md` for usage notes.
+
+## V1.2 — Dynamic OpenRouter video catalog
+
+CTRL-B no longer uses a fixed model whitelist. `/api/models` reads OpenRouter's live `GET /api/v1/videos/models` catalog and returns every currently available video-generation model. The requested production models remain curated as featured entries and have local fallback capability/pricing metadata for temporary catalog outages.
+
+The model picker is searchable and grouped by company. Selecting a model shows:
+
+- Prompt character limit when documented (`Hard`, `Safe recommendation`, or `Not published`)
+- Reference-image count when documented
+- Supported durations
+- Resolutions from low to high, or exact output sizes when that is what OpenRouter publishes
+- Aspect ratios
+- First/last-frame support
+- Native audio support
+- Provider-specific passthrough parameters in Expert options
+
+Featured production models include Google Veo 3.1 / Lite / Fast, OpenAI Sora 2 Pro, ByteDance Seedance 1.5/2.x, Kling 3 Pro/Standard/O1, and Runway Gen-4.5/Aleph 2.
+
+`runway/aleph-2` is intentionally discoverable but generation is blocked in V1.2 because Aleph is a source-video editing workflow. Add source-video upload before enabling its submit path.
+
+OpenRouter does not currently publish a universal prompt-character limit or reference-image count for every video model in `/videos/models`. CTRL-B therefore never invents a hard number: unknown values are explicitly displayed as `Not published by OpenRouter`, while known provider limits use curated constraint overlays.

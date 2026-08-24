@@ -5,6 +5,7 @@ import type { AssetRole, CreativeState, UploadedAsset, VideoJob, VideoModel } fr
 import { buildPrompt, fitPromptToChars } from "@/lib/prompt-builder";
 import { countPromptChars, getModelConstraint, safePromptTarget } from "@/lib/model-constraints";
 import { estimateVideoCost, money } from "@/lib/pricing";
+import { companyLabel, companyRank, featuredRank, isFeatured } from "@/lib/model-catalog";
 
 const PRESETS = ["Product Hero Ad", "UGC Talking Ad", "Beauty / Cosmetics Demo", "Perfume Cinematic", "Footwear Showcase", "Custom"];
 const CATEGORIES = ["Perfume", "Cosmetics", "Makeup", "Skincare", "Footwear", "Fashion", "Other"];
@@ -24,11 +25,86 @@ function Select({ label, value, options, onChange }: { label: string; value: str
   return <label className="field"><span>{label}</span><select value={value} onChange={(e) => onChange(e.target.value)}>{options.map((o) => <option key={o}>{o}</option>)}</select></label>;
 }
 function PillGroup({ label, values, selected, onChange }: { label: string; values: Array<string | number>; selected: string | number; onChange: (v: string) => void }) {
+  if (!values.length) return null;
   return <div className="field"><span>{label}</span><div className="pills">{values.map((v) => <button type="button" className={String(selected) === String(v) ? "pill active" : "pill"} key={v} onClick={() => onChange(String(v))}>{v}</button>)}</div></div>;
+}
+
+function compactModelMeta(model: VideoModel) {
+  const durations = model.supported_durations ?? [];
+  const quality = model.supported_resolutions?.length ? model.supported_resolutions.join("/") : model.supported_sizes?.length ? model.supported_sizes.join("/") : "dynamic";
+  const d = durations.length ? (durations.length === 1 ? `${durations[0]}s` : `${durations[0]}–${durations.at(-1)}s`) : "duration varies";
+  return `${d} · ${quality}`;
+}
+
+function ModelPicker({ models, value, onChange }: { models: VideoModel[]; value: string; onChange: (id: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const selected = models.find((m) => m.id === value);
+
+  useEffect(() => {
+    const close = (event: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, []);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const list = !q ? models : models.filter((m) => `${m.name} ${m.id} ${companyLabel(m)}`.toLowerCase().includes(q));
+    return [...list].sort((a, b) => {
+      if (q) {
+        const score = (m: VideoModel) => {
+          const name = m.name.toLowerCase();
+          const slug = m.id.split("/").at(-1)?.toLowerCase() ?? "";
+          const company = companyLabel(m).toLowerCase();
+          return (name.startsWith(q) ? 0 : slug.startsWith(q) ? 1 : company.startsWith(q) ? 2 : name.includes(q) ? 3 : slug.includes(q) ? 4 : 5);
+        };
+        return score(a) - score(b) || companyRank(companyLabel(a)) - companyRank(companyLabel(b)) || a.name.localeCompare(b.name);
+      }
+      return companyRank(companyLabel(a)) - companyRank(companyLabel(b)) || companyLabel(a).localeCompare(companyLabel(b)) || Number(!isFeatured(a.id)) - Number(!isFeatured(b.id)) || featuredRank(a.id) - featuredRank(b.id) || a.name.localeCompare(b.name);
+    });
+  }, [models, query]);
+
+  const grouped = useMemo(() => {
+    const map = new Map<string, VideoModel[]>();
+    for (const m of filtered) {
+      const label = companyLabel(m);
+      map.set(label, [...(map.get(label) ?? []), m]);
+    }
+    return [...map.entries()].sort((a, b) => companyRank(a[0]) - companyRank(b[0]) || a[0].localeCompare(b[0]));
+  }, [filtered]);
+
+  const choose = (id: string) => { onChange(id); setOpen(false); setQuery(""); };
+
+  return <div className="field model-picker-field" ref={wrapRef}>
+    <span>Video model</span>
+    <button type="button" className={open ? "model-picker-trigger open" : "model-picker-trigger"} onClick={() => setOpen((v) => !v)}>
+      <div><strong>{selected?.name ?? "Choose a video model"}</strong><small>{selected ? `${companyLabel(selected)} · ${selected.id}` : "OpenRouter video catalog"}</small></div><b>⌄</b>
+    </button>
+    {open && <div className="model-picker-popover">
+      <div className="model-search"><span>⌕</span><input autoFocus value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search Seedance, Veo, Sora, Kling…"/></div>
+      <div className="model-picker-scroll">
+        {grouped.map(([company, items]) => {
+          const visibleItems = [...items].sort((a, b) => Number(!isFeatured(a.id)) - Number(!isFeatured(b.id)) || featuredRank(a.id) - featuredRank(b.id) || a.name.localeCompare(b.name));
+          if (!visibleItems.length) return null;
+          return <div className="model-group" key={company}><div className="model-group-title"><span>{company}</span><small>{visibleItems.length}</small></div>{visibleItems.map((m) => <button type="button" className={m.id === value ? "model-option active" : "model-option"} key={m.id} onClick={() => choose(m.id)}><div><strong>{m.name}{isFeatured(m.id) && <i className="featured-mark">FEATURED</i>}</strong><small>{m.id}</small></div><span>{compactModelMeta(m)}</span></button>)}</div>;
+        })}
+        {!filtered.length && <div className="model-empty">No video models match “{query}”.</div>}
+      </div>
+    </div>}
+  </div>;
+}
+
+function LimitValue({ value, confidence }: { value?: number; confidence?: "hard" | "recommended" | "unknown" }) {
+  if (value === undefined || confidence === "unknown") return <><strong>Not published</strong><small>by OpenRouter</small></>;
+  return <><strong>{value.toLocaleString()}</strong><small>{confidence === "hard" ? "hard limit" : "safe recommendation"}</small></>;
 }
 
 export function Studio({ egpRate }: { egpRate: number }) {
   const [models, setModels] = useState<VideoModel[]>([]);
+  const [modelCount, setModelCount] = useState(0);
   const [fxRate, setFxRate] = useState(egpRate);
   const [modelId, setModelId] = useState("bytedance/seedance-2.5");
   const [metaSource, setMetaSource] = useState("loading");
@@ -39,6 +115,7 @@ export function Studio({ egpRate }: { egpRate: number }) {
   const [uploading, setUploading] = useState(false);
   const [duration, setDuration] = useState(5);
   const [resolution, setResolution] = useState("720p");
+  const [outputSize, setOutputSize] = useState("");
   const [aspect, setAspect] = useState("9:16");
   const [audio, setAudio] = useState(false);
   const [seedEnabled, setSeedEnabled] = useState(false);
@@ -57,7 +134,10 @@ export function Studio({ egpRate }: { egpRate: number }) {
 
   useEffect(() => {
     fetch("/api/models").then((r) => r.json()).then((data) => {
-      setModels(data.models ?? []); setMetaSource(data.source ?? "unknown");
+      const nextModels = data.models ?? [];
+      setModels(nextModels);
+      setModelCount(data.totalCount ?? nextModels.length);
+      setMetaSource(data.source ?? "unknown");
     }).catch(() => setError("Could not load model capabilities."));
   }, []);
 
@@ -65,15 +145,26 @@ export function Studio({ egpRate }: { egpRate: number }) {
     if (!model) return;
     const ds = model.supported_durations ?? [];
     const rs = model.supported_resolutions ?? [];
+    const sizes = model.supported_sizes ?? [];
     const ars = model.supported_aspect_ratios ?? [];
     if (ds.length && !ds.includes(duration)) setDuration(ds.includes(5) ? 5 : ds[0]);
-    if (rs.length && !rs.includes(resolution)) setResolution(rs.includes("720p") ? "720p" : rs[0]);
+    if (rs.length) {
+      if (!rs.includes(resolution)) setResolution(rs.includes("720p") ? "720p" : rs[0]);
+      if (outputSize) setOutputSize("");
+    } else if (sizes.length) {
+      if (!sizes.includes(outputSize)) setOutputSize(sizes[0]);
+      if (resolution) setResolution("");
+    } else {
+      if (resolution) setResolution("");
+      if (outputSize) setOutputSize("");
+    }
     if (ars.length && !ars.includes(aspect)) setAspect(ars.includes("9:16") ? "9:16" : ars[0]);
     if (!model.generate_audio) setAudio(false);
-  }, [model, duration, resolution, aspect]);
+  }, [model, duration, resolution, outputSize, aspect]);
 
   const patch = <K extends keyof CreativeState>(key: K, value: CreativeState[K]) => setCreative((c) => ({ ...c, [key]: value }));
-  const estimate = useMemo(() => estimateVideoCost(model, duration, resolution, audio), [model, duration, resolution, audio]);
+  const qualityKey = resolution || outputSize;
+  const estimate = useMemo(() => estimateVideoCost(model, duration, qualityKey, audio), [model, duration, qualityKey, audio]);
   const actual = job?.usage?.cost ?? null;
   const terminal = job && ["completed", "failed", "cancelled", "expired"].includes(job.status);
   const first = assets.find((a) => a.role === "first_frame");
@@ -83,7 +174,8 @@ export function Studio({ egpRate }: { egpRate: number }) {
   const promptLimit = constraint.promptMaxChars ?? null;
   const hardPromptOver = Boolean(promptLimit && constraint.promptLimitConfidence === "hard" && promptChars > promptLimit);
   const refLimit = constraint.maxReferenceImages ?? null;
-  const hardRefOver = Boolean(refLimit && constraint.referenceLimitConfidence === "hard" && refs.length > refLimit);
+  const hardRefOver = Boolean(refLimit !== null && constraint.referenceLimitConfidence === "hard" && refs.length > refLimit);
+  const requiresSourceVideo = Boolean(constraint.requiresSourceVideo || model?.workflow === "video_edit");
 
   const uploadFiles = useCallback(async (files: FileList | File[]) => {
     const max = 15 - assets.length;
@@ -119,6 +211,7 @@ export function Studio({ egpRate }: { egpRate: number }) {
 
   const submit = async () => {
     if (!model || !prompt.trim()) return;
+    if (requiresSourceVideo) { setError(`${model.name} requires a source video. It is listed for discovery, but CTRL-B V1.2 does not yet upload source video for edit models.`); return; }
     if (hardPromptOver && promptLimit) { setError(`Prompt is ${promptChars} characters; ${model.name} accepts at most ${promptLimit}. Use “Fit to model” first.`); return; }
     if (hardRefOver && refLimit) { setError(`${model.name} accepts at most ${refLimit} active reference images. Mark extra uploads as “Not sent” or switch models.`); return; }
     setSubmitting(true); setError(""); setJob(null);
@@ -128,7 +221,7 @@ export function Studio({ egpRate }: { egpRate: number }) {
         try { provider = JSON.parse(providerJson); } catch { throw new Error("Expert provider JSON is invalid."); }
       }
       const r = await fetch("/api/video/submit", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
-        model: model.id, prompt, duration, resolution, aspect_ratio: aspect, generate_audio: audio,
+        model: model.id, prompt, duration, resolution: resolution || undefined, size: outputSize || undefined, aspect_ratio: outputSize ? undefined : aspect || undefined, generate_audio: audio,
         seed: seedEnabled ? seed : undefined, firstFrameId: first?.id, lastFrameId: last?.id, referenceIds: refs.map((a) => a.id), provider,
       }) });
       const data = await r.json(); if (!r.ok) throw new Error(data.error || "Submission failed"); setJob(data.job);
@@ -150,7 +243,7 @@ export function Studio({ egpRate }: { egpRate: number }) {
   return <main className="shell">
     <header className="topbar">
       <div className="brand"><div className="brandmark">CB</div><div><strong>CTRL-B</strong><span>VIDEO STUDIO</span></div></div>
-      <div className="topmeta"><span className={`dot ${metaSource === "openrouter-live" ? "ok" : "warn"}`} />{metaSource === "openrouter-live" ? "Live model metadata" : metaSource === "loading" ? "Loading capabilities" : "Fallback metadata"}<span className="divider" />OpenRouter engine</div>
+      <div className="topmeta"><span className={`dot ${metaSource === "openrouter-live" ? "ok" : "warn"}`} />{metaSource === "openrouter-live" ? `Live catalog · ${modelCount} video models` : metaSource === "loading" ? "Loading video catalog" : `Fallback catalog · ${modelCount} models`}<span className="divider" />OpenRouter engine</div>
     </header>
 
     <section className="workspace">
@@ -159,8 +252,20 @@ export function Studio({ egpRate }: { egpRate: number }) {
 
         <section className="card"><div className="cardhead"><div><span className="step">01</span><h2>Production setup</h2></div><span className="muted">Choose workflow + model</span></div>
           <div className="preset-grid">{PRESETS.map((p) => <button type="button" className={creative.preset === p ? "preset active" : "preset"} onClick={() => patch("preset", p)} key={p}>{p}</button>)}</div>
-          <div className="grid two"><label className="field"><span>Video model</span><select value={modelId} onChange={(e) => setModelId(e.target.value)}>{models.length ? models.map((m) => <option value={m.id} key={m.id}>{m.name}</option>) : <option value={modelId}>Loading video models…</option>}</select></label><Select label="Product category" value={creative.category} options={CATEGORIES} onChange={(v) => patch("category", v)}/></div>
-          {model && <div className="model-note"><div><strong>{model.name}</strong><p>{model.description}</p></div><div className="badges"><span>{model.supported_durations?.[0]}–{model.supported_durations?.at(-1)}s</span><span>{model.supported_resolutions?.join(" / ")}</span>{model.generate_audio && <span>Audio</span>}</div></div>}
+          <div className="grid two"><ModelPicker models={models} value={modelId} onChange={setModelId}/><Select label="Product category" value={creative.category} options={CATEGORIES} onChange={(v) => patch("category", v)}/></div>
+          {model && <div className="model-cap-card">
+            <div className="model-cap-head"><div><span>{companyLabel(model)}</span><strong>{model.name}</strong><code>{model.id}</code></div><div className="badges">{isFeatured(model.id) && <span>Featured</span>}{model.fallback && <span>Fallback data</span>}{model.workflow === "video_edit" && <span className="danger-badge">Video edit</span>}</div></div>
+            {model.description && <p className="model-description">{model.description}</p>}
+            <div className="cap-grid">
+              <div className="cap"><span>Prompt text</span><LimitValue value={constraint.promptMaxChars} confidence={constraint.promptLimitConfidence}/></div>
+              <div className="cap"><span>Reference images</span><LimitValue value={constraint.maxReferenceImages} confidence={constraint.referenceLimitConfidence}/></div>
+              <div className="cap"><span>Duration</span><strong>{model.supported_durations?.length ? `${model.supported_durations[0]}${model.supported_durations.length > 1 ? `–${model.supported_durations.at(-1)}` : ""} sec` : "Not published"}</strong><small>{model.supported_durations?.length ? model.supported_durations.join(", ") + "s" : "live metadata unavailable"}</small></div>
+              <div className="cap"><span>Quality</span><strong>{model.supported_resolutions?.length ? model.supported_resolutions.join(" → ") : model.supported_sizes?.length ? model.supported_sizes.join(" → ") : "Not published"}</strong><small>low → high</small></div>
+              <div className="cap"><span>Aspect ratios</span><strong>{model.supported_aspect_ratios?.length ? model.supported_aspect_ratios.join(" · ") : "Not published"}</strong><small>OpenRouter metadata</small></div>
+              <div className="cap"><span>Inputs / audio</span><strong>{model.supported_frame_images?.length ? model.supported_frame_images.map((x) => x === "first_frame" ? "First" : "Last").join(" + ") : "No frame control listed"}</strong><small>{model.generate_audio ? "Native audio available" : "No native audio advertised"}</small></div>
+            </div>
+            {constraint.note && <div className={requiresSourceVideo ? "model-constraint danger" : "model-constraint"}>{constraint.note}</div>}
+          </div>}
         </section>
 
         <section className="card"><div className="cardhead"><div><span className="step">02</span><h2>Product references</h2></div><span className="counter">{assets.length}/15</span></div>
@@ -174,7 +279,7 @@ export function Studio({ egpRate }: { egpRate: number }) {
             {creative.variantMode === "multi_color" && creative.variantStrategy === "target_only" && <Field label="Target colorway" value={creative.targetVariant} onChange={(v) => patch("targetVariant", v)} placeholder="e.g. Black / Burgundy / Beige"/>}
             <p>For the same shoe/product in different colors, label each image below. The prompt compiler locks geometry and branding so colorways are not treated as different designs.</p>
           </div>
-          {refLimit && <div className={hardRefOver ? "limit-note danger" : refs.length >= refLimit ? "limit-note warn" : "limit-note"}><strong>{model?.name}: {refLimit} reference image{refLimit === 1 ? "" : "s"} {constraint.referenceLimitConfidence === "hard" ? "max" : "recommended"}</strong><span>{refs.length} active reference{refs.length === 1 ? "" : "s"}. Use “Not sent” on extra uploads if needed.</span></div>}
+          {refLimit !== null && <div className={hardRefOver ? "limit-note danger" : refs.length >= refLimit ? "limit-note warn" : "limit-note"}><strong>{model?.name}: {refLimit} reference image{refLimit === 1 ? "" : "s"} {constraint.referenceLimitConfidence === "hard" ? "max" : "recommended"}</strong><span>{refs.length} active reference{refs.length === 1 ? "" : "s"}. Use “Not sent” on extra uploads if needed.</span></div>}
           {assets.length > 0 && <div className="asset-grid">{assets.map((a) => <div className="asset" key={a.id}><img src={a.url} alt={a.name}/><button className="asset-x" onClick={() => removeAsset(a.id)}>×</button><div className="asset-controls"><select value={a.role} onChange={(e) => setRole(a.id, e.target.value as AssetRole)}><option value="reference">Product reference</option><option value="detail">Detail reference</option><option value="exclude">Not sent · keep uploaded</option>{model?.supported_frame_images?.includes("first_frame") && <option value="first_frame">First frame</option>}{model?.supported_frame_images?.includes("last_frame") && <option value="last_frame">Last frame</option>}</select>{creative.variantMode === "multi_color" && <input value={a.variant} placeholder="Colorway e.g. Black" onChange={(e) => setAssets((p) => p.map((x) => x.id === a.id ? { ...x, variant: e.target.value } : x))}/>}<input value={a.note} placeholder="e.g. side view / sole detail" onChange={(e) => setAssets((p) => p.map((x) => x.id === a.id ? { ...x, note: e.target.value } : x))}/></div></div>)}</div>}
         </section>
 
@@ -190,8 +295,9 @@ export function Studio({ egpRate }: { egpRate: number }) {
 
         <section className="card"><div className="cardhead"><div><span className="step">04</span><h2>Output controls</h2></div><span className="muted">Only supported options are shown</span></div>
           <PillGroup label="Duration" values={model?.supported_durations ?? [5]} selected={duration} onChange={(v) => setDuration(Number(v))}/>
-          <PillGroup label="Aspect ratio" values={model?.supported_aspect_ratios ?? ["9:16"]} selected={aspect} onChange={setAspect}/>
-          <PillGroup label="Resolution" values={model?.supported_resolutions ?? ["720p"]} selected={resolution} onChange={setResolution}/>
+          {!outputSize && <PillGroup label="Aspect ratio" values={model?.supported_aspect_ratios ?? []} selected={aspect} onChange={setAspect}/>}
+          <PillGroup label="Resolution" values={model?.supported_resolutions ?? []} selected={resolution} onChange={setResolution}/>
+          {!model?.supported_resolutions?.length && <PillGroup label="Output size" values={model?.supported_sizes ?? []} selected={outputSize} onChange={setOutputSize}/>}
           <div className="toggle-row"><div><span>Native audio</span><small>{model?.generate_audio ? "Generate dialogue / ambience with the video" : "Not advertised by this model"}</small></div><button type="button" disabled={!model?.generate_audio} className={audio ? "switch on" : "switch"} onClick={() => setAudio((v) => !v)}><i /></button></div>
           <div className="toggle-row"><div><span>Deterministic seed</span><small>Useful for controlled retries when the provider honors seed</small></div><button type="button" className={seedEnabled ? "switch on" : "switch"} onClick={() => setSeedEnabled((v) => !v)}><i /></button></div>
           {seedEnabled && <Field label="Seed" value={String(seed)} onChange={(v) => setSeed(Number(v) || 0)}/>} 
@@ -202,8 +308,8 @@ export function Studio({ egpRate }: { egpRate: number }) {
 
       <aside className="result-column">
         <div className="sticky">
-          <section className="cost-card"><div className="cost-head"><span>ESTIMATED GENERATION</span><span className="live-dot">LIVE</span></div><div className="cost-main"><strong>{money(estimate)}</strong><span>≈ {estimate === null ? "—" : money(estimate * fxRate, "EGP")}</span></div><div className="cost-break"><span>{model?.name ?? "Model"}</span><b>{duration}s · {resolution} · {aspect}</b><span>Audio</span><b>{audio ? "On" : "Off"}</b><span>References</span><b>{refs.length + Number(Boolean(first)) + Number(Boolean(last))}</b><span>USD/EGP rate</span><label className="fx-mini"><input type="number" min="1" step="0.01" value={fxRate} onChange={(e) => setFxRate(Math.max(1, Number(e.target.value) || 1))}/></label></div><p className="estimate-note">Estimate uses live OpenRouter pricing metadata when recognizable, with a dated fallback for the six test models. Final OpenRouter usage is shown after completion.</p></section>
-          <button className="generate" type="button" disabled={submitting || !model || !prompt.trim() || hardPromptOver || hardRefOver} onClick={submit}><span>{submitting ? "SUBMITTING…" : job && !terminal ? "GENERATION RUNNING" : "GENERATE VIDEO"}</span><b>{estimate === null ? "Cost after render" : money(estimate)}</b></button>
+          <section className="cost-card"><div className="cost-head"><span>ESTIMATED GENERATION</span><span className="live-dot">LIVE</span></div><div className="cost-main"><strong>{money(estimate)}</strong><span>≈ {estimate === null ? "—" : money(estimate * fxRate, "EGP")}</span></div><div className="cost-break"><span>{model?.name ?? "Model"}</span><b>{duration}s · {qualityKey || "dynamic quality"}{outputSize ? "" : ` · ${aspect}`}</b><span>Audio</span><b>{audio ? "On" : "Off"}</b><span>References</span><b>{refs.length + Number(Boolean(first)) + Number(Boolean(last))}</b><span>USD/EGP rate</span><label className="fx-mini"><input type="number" min="1" step="0.01" value={fxRate} onChange={(e) => setFxRate(Math.max(1, Number(e.target.value) || 1))}/></label></div><p className="estimate-note">Estimate uses live OpenRouter pricing metadata when recognizable, with curated fallback pricing for featured models. Final OpenRouter usage is shown after completion.</p></section>
+          <button className="generate" type="button" disabled={submitting || !model || !prompt.trim() || hardPromptOver || hardRefOver || requiresSourceVideo} onClick={submit}><span>{requiresSourceVideo ? "SOURCE VIDEO REQUIRED" : submitting ? "SUBMITTING…" : job && !terminal ? "GENERATION RUNNING" : "GENERATE VIDEO"}</span><b>{estimate === null ? "Cost after render" : money(estimate)}</b></button>
           {error && <div className="errorbox"><strong>Studio notice</strong><p>{error}</p></div>}
 
           <section className="preview-card"><div className="preview-head"><div><span>OUTPUT MONITOR</span><strong>{job ? job.status.replace("_", " ") : "Ready"}</strong></div>{job && <code>{job.id}</code>}</div>
@@ -217,6 +323,6 @@ export function Studio({ egpRate }: { egpRate: number }) {
         </div>
       </aside>
     </section>
-    <footer><span>CTRL-B Video Studio · Experimental V1</span><span>No login · No database · Server-side OpenRouter key</span></footer>
+    <footer><span>CTRL-B Video Studio · Experimental V1.2</span><span>No login · No database · Server-side OpenRouter key</span></footer>
   </main>;
 }
